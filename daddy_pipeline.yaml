@@ -1,0 +1,365 @@
+# PIPELINE DEFINITION
+# Name: daddy-pipeline
+# Description: My daddy pipeline
+# Inputs:
+#    path: str
+components:
+  comp-db-worker:
+    executorLabel: exec-db-worker
+    inputDefinitions:
+      parameters:
+        data:
+          parameterType: STRING
+    outputDefinitions:
+      parameters:
+        Output:
+          parameterType: STRING
+  comp-llm-candidate-generator:
+    executorLabel: exec-llm-candidate-generator
+    inputDefinitions:
+      parameters:
+        seed_data:
+          parameterType: STRING
+    outputDefinitions:
+      parameters:
+        Output:
+          parameterType: STRING
+  comp-llm-md:
+    executorLabel: exec-llm-md
+    inputDefinitions:
+      parameters:
+        path:
+          parameterType: STRING
+    outputDefinitions:
+      parameters:
+        Output:
+          parameterType: STRING
+  comp-llm-seed-data:
+    executorLabel: exec-llm-seed-data
+    inputDefinitions:
+      parameters:
+        md_file:
+          parameterType: STRING
+    outputDefinitions:
+      parameters:
+        Output:
+          parameterType: STRING
+deploymentSpec:
+  executors:
+    exec-db-worker:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - db_worker
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'sqlalchemy>=2.0.25'\
+          \ 'psycopg2-binary>=2.9.12' 'python-dotenv>=1.2.2'  &&  python3 -m pip install\
+          \ --quiet --no-warn-script-location 'kfp==2.16.0' '--no-deps' 'typing-extensions>=3.7.4,<5;\
+          \ python_version<\"3.9\"' && \"$0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef db_worker(data:str)->str:\n    import os\n    from psycopg2 import\
+          \ connect\n    import dotenv\n    import json\n    dotenv.load_dotenv()\n\
+          \    data=json.loads(data)\n    for d in data:\n        i=d[\"question\"\
+          ]\n        j=d[\"original_ans\"]\n        k=d[\"candidate_answers\"]\n \
+          \       conn=connect(\n            host=os.getenv(\"DB_HOST\"),\n      \
+          \      user=os.getenv(\"DB_USER\"),\n            password=os.getenv(\"DB_PASSWORD\"\
+          ),\n            dbname=os.getenv(\"DB_NAME\"),\n        )\n        cur=conn.cursor()\n\
+          \        cur.execute(\"INSERT INTO storage (question,original_answer,candidate_answers)\
+          \ VALUES (%s,%s,%s)\",(i,j,json.dumps(k)))\n        conn.commit()\n    \
+          \    cur.close()\n    conn.close()\n    return \"Data inserted successfully\"\
+          \n\n"
+        env:
+        - name: DB_HOST
+          value: host.minikube.internal
+        - name: DB_USER
+          value: postgres
+        - name: DB_PASSWORD
+          value: password
+        - name: DB_NAME
+          value: postgres
+        image: python:3.12
+    exec-llm-candidate-generator:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - llm_candidate_generator
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'langchain_nvidia_ai_endpoints>=1.2.1'\
+          \ 'python-dotenv>=1.2.2'  &&  python3 -m pip install --quiet --no-warn-script-location\
+          \ 'kfp==2.16.0' '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"\
+          3.9\"' && \"$0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef llm_candidate_generator(seed_data:str)->str:\n    import os\n\
+          \    import json\n    from langchain_nvidia_ai_endpoints import ChatNVIDIA\n\
+          \    # seed_data_dic=json.loads(seed_data)\n    import dotenv\n    dotenv.load_dotenv()\n\
+          \    client_candidate_generator=ChatNVIDIA(\n        model=os.getenv(\"\
+          NVIDIA_MODEL2\"),\n        api_key=os.getenv(\"NVIDIA_API_KEY2\"),\n   \
+          \     top_p=1,\n        temperature=0.3,\n        max_completion_tokens=256,\n\
+          \    )\n    client_dean=ChatNVIDIA(\n        model=os.getenv(\"NVIDIA_MODEL2\"\
+          ),\n        api_key=os.getenv(\"NVIDIA_API_KEY2\"),\n        top_p=1,\n\
+          \        temperature=0.3,\n        max_completion_tokens=256,\n    )\n \
+          \   def first_json(text):\n        text=text.strip().replace(\"```json\"\
+          ,\"\").replace(\"```\",\"\").strip()\n        start_candidates=[i for i\
+          \ in [text.find(\"[\"),text.find(\"{\")] if i!=-1]\n        if not start_candidates:\n\
+          \            raise ValueError(\"No JSON found\")\n        start=min(start_candidates)\n\
+          \        obj,_=json.JSONDecoder().raw_decode(text[start:])\n        return\
+          \ obj\n    x=json.loads(seed_data)\n    if isinstance(x,str):\n        x=json.loads(x)\n\
+          \    if isinstance(x,dict):\n        x=[x]\n    if not isinstance(x,list):\n\
+          \        raise ValueError(\"Invalid input format, list olyyyyy\")\n    dean_output=[]\n\
+          \    for i in x:\n        c=i.get(\"question\",\"\")\n        a=i.get(\"\
+          answer\",\"\")\n        prompt=f\"\"\"\n        You are an expert AI data\
+          \ generator. I will give you a Question. \n        Your task is to generate\
+          \ 3 distinct, accurate, and meaningful answers to this question.\n     \
+          \   Question: {c}\n        Rules:\n        1. The 3 answers must be factually\
+          \ correct and directly answer the question.\n        2. Vary the length\
+          \ and sentence structure.\n        3. Output ONLY valid JSON in this exact\
+          \ format, with no markdown code blocks (no ```json):\n        [\n      \
+          \  {{\"answer\": \"...\"}},\n        {{\"answer\": \"...\"}},\n        {{\"\
+          answer\": \"...\"}}\n        ]\n        \"\"\"\n        candi_raw=client_candidate_generator.invoke(prompt).content\n\
+          \        try:\n            candi_json=first_json(candi_raw)\n        except:\n\
+          \            candi_json=[{\"answer\":a}]\n        if isinstance(candi_json,dict):\n\
+          \            candi_json=[candi_json]\n        candidate_answers=[]\n   \
+          \     for j in candi_json:\n            if isinstance(j,dict) and j.get(\"\
+          answer\"):\n                candidate_answers.append(j[\"answer\"].strip())\n\
+          \        prompt_dean=f\"\"\"\n        You are an expert evaluator.\n   \
+          \     Question: {c}\n        Ground Truth Answer: {a}\n        Candidate\
+          \ Answers to Evaluate: {json.dumps(candidate_answers,ensure_ascii=False)}\n\
+          \        Evaluation Rules:\n        1. Compare EACH candidate answer against\
+          \ the Ground Truth Answer.\n        2. ACCEPT a candidate if it correctly\
+          \ answers the question AND its core facts align with the Ground Truth. Synonyms\
+          \ and rephrasing are perfectly fine.\n        3. REJECT a candidate if it\
+          \ introduces new facts, industries, or concepts NOT found in the Ground\
+          \ Truth (e.g., hallucinating external knowledge).\n        4. REJECT a candidate\
+          \ if it contradicts the Ground Truth or misses the core point.\n       \
+          \ Output ONLY valid JSON without markdown code blocks (no ```json) in this\
+          \ exact format:\n        {{\n        \"question\": \"{c}\",\n        \"\
+          original_ans\": \"{a}\",\n        \"candidate_answers\": [\"<only accepted\
+          \ answers>\"]\n        }}\n        \"\"\"\n        # try:\n        #   \
+          \  p=json.loads(client_dean.invoke(prompt_dean).content)\n        # except:\n\
+          \        #     p={\"question\":c,\"original_ans\":i.get(\"answer\"),\"candidate_answers\"\
+          :[candi_ans.content]}\n        # try:\n        #     p=json.loads(client_dean.invoke(prompt_dean))\n\
+          \        # except:\n        #     p={\"question\":c,\"original_ans\":i.get(\"\
+          answer\"),\"candidate_answers\":[candi_ans.content]}\n        dean_raw=client_dean.invoke(prompt_dean).content\n\
+          \        try:\n            p=first_json(dean_raw)\n        except:\n   \
+          \         p={\"question\":c,\"original_ans\":a,\"candidate_answers\":candidate_answers}\n\
+          \n        if not isinstance(p,dict):\n            p={\"question\":c,\"original_ans\"\
+          :a,\"candidate_answers\":candidate_answers}\n\n        if \"question\" not\
+          \ in p:\n            p[\"question\"]=c\n        if \"original_ans\" not\
+          \ in p:\n            p[\"original_ans\"]=a\n        if \"candidate_answers\"\
+          \ not in p or not isinstance(p[\"candidate_answers\"],list):\n         \
+          \   p[\"candidate_answers\"]=candidate_answers\n\n        dean_output.append(p)\
+          \  \n    return json.dumps(dean_output)\n\n"
+        env:
+        - name: NVIDIA_API_KEY2
+          value: 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
+        - name: NVIDIA_MODEL2
+          value: moonshotai/kimi-k2-instruct-0905
+        image: python:3.12
+    exec-llm-md:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - llm_md
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'langchain-nvidia-ai-endpoints>=1.2.1'\
+          \ 'pypdf>=6.10.2' 'minio>=7.2.20' 'python-dotenv>=1.2.2'  &&  python3 -m\
+          \ pip install --quiet --no-warn-script-location 'kfp==2.16.0' '--no-deps'\
+          \ 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"$0\" \"$@\"\
+          \n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef llm_md(path:str)->str:\n    import os\n    from pypdf import\
+          \ PdfReader\n    from minio import Minio\n    from langchain_nvidia_ai_endpoints\
+          \ import ChatNVIDIA\n    import dotenv\n    dotenv.load_dotenv()\n    print(\"\
+          Minio start\")\n    client_minio=Minio(\n        endpoint=os.getenv(\"MINIO_ENDPOINT\"\
+          ),\n        access_key=os.getenv(\"MINIO_ACCESS_KEY\"),\n        secret_key=os.getenv(\"\
+          MINIO_SECRET_KEY\"),\n        secure=False,\n    )\n    print(\"Minio end\"\
+          )\n    local=\"/tmp/mypdf.pdf\"  \n    client_minio.fget_object(\"pdf\"\
+          ,\"stem_topicccc.pdf\",local)\n    print(\"Minio end2\")\n    x=PdfReader(local)\n\
+          \    text=\"\"\n    op =[]\n    client_md=ChatNVIDIA(\n    model=os.getenv(\"\
+          NVIDIA_MODEL2\"),\n    api_key=os.getenv(\"NVIDIA_API_KEY2\"),\n    temperature=0.1,\n\
+          \    top_p=1,\n    max_completion_tokens=256,\n)\n    op=[]\n\n    for i\
+          \ in x.pages:\n        chunk=i.extract_text()\n        if not chunk:\n \
+          \           continue\n        prompt=f\"\"\"\n            You are a expert\
+          \ in pdf to markdown conversion. You are given an input {chunk},\n     \
+          \       and you have to convert it into proper correct markdown format making\
+          \ sure that :\n            - headings,titles,sub-titles(#,##,###) are all\
+          \ semantically correct.\n            - NO EXTRA IS ADDED OR REMOVED FROM\
+          \ THE TEXT PROVIDED TO YOU\n            - YOU ONLY HAVE TO TRANSFORM THE\
+          \ SCHEMA TO MARKDOWN FORMAT\n            Make me proud by doing all this\
+          \ without mistake and proper break statements and provide a output as a\
+          \ proper markdown file.\n        \"\"\"\n\n        md=client_md.invoke(prompt)\n\
+          \        op.append(md.content)\n    return \"\\n\".join(op)\n\n"
+        env:
+        - name: MINIO_ENDPOINT
+          value: host.minikube.internal:9000
+        - name: MINIO_ACCESS_KEY
+          value: minioadmin
+        - name: MINIO_SECRET_KEY
+          value: changeme
+        - name: NVIDIA_API_KEY2
+          value: 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
+        - name: NVIDIA_MODEL2
+          value: moonshotai/kimi-k2-instruct-0905
+        image: python:3.12
+    exec-llm-seed-data:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - llm_seed_data
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'langchain_nvidia_ai_endpoints>=1.2.1'\
+          \ 'python-dotenv>=1.2.2'  &&  python3 -m pip install --quiet --no-warn-script-location\
+          \ 'kfp==2.16.0' '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"\
+          3.9\"' && \"$0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef llm_seed_data(md_file:str)->str:\n    import os\n    import dotenv\n\
+          \    from langchain_nvidia_ai_endpoints import ChatNVIDIA\n    dotenv.load_dotenv()\n\
+          \    print(\"model start\")\n    client_seed_data=ChatNVIDIA(\n        model=os.getenv(\"\
+          NVIDIA_MODEL2\"),\n        api_key=os.getenv(\"NVIDIA_API_KEY2\"),\n   \
+          \     top_p=1,\n        temperature=0.3,\n        max_completion_tokens=256,\n\
+          \    )\n    prompt=f\"\"\"You are given the following markdown content:\n\
+          \    {md_file}\n    Task:\n    Generate exactly 3 Question-Answer pairs\
+          \ based ONLY on the provided content.\n    Rules:\n    - Use only information\
+          \ explicitly present in the markdown.\n    - Do not add, infer, or hallucinate\
+          \ any information.\n    - Each question must be clear and specific.\n  \
+          \  - Each answer must be complete and directly supported by the content.\n\
+          \    Output format (strict):\n    [\n    {{\"question\": \"...\", \"answer\"\
+          : \"...\"}},\n    {{\"question\": \"...\", \"answer\": \"...\"}},\n    {{\"\
+          question\": \"...\", \"answer\": \"...\"}}\n    ]\n    Return ONLY the JSON\
+          \ array.\n    No extra text.\n    Make me proud by following this perfectly.\n\
+          \    \"\"\"\n    seed_data=client_seed_data.invoke(prompt)\n    print(\"\
+          model end\")\n    return seed_data.content.strip()\n\n"
+        env:
+        - name: NVIDIA_API_KEY2
+          value: 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
+        - name: NVIDIA_MODEL2
+          value: moonshotai/kimi-k2-instruct-0905
+        image: python:3.12
+pipelineInfo:
+  description: My daddy pipeline
+  name: daddy-pipeline
+root:
+  dag:
+    tasks:
+      db-worker:
+        cachingOptions: {}
+        componentRef:
+          name: comp-db-worker
+        dependentTasks:
+        - llm-candidate-generator
+        inputs:
+          parameters:
+            data:
+              taskOutputParameter:
+                outputParameterKey: Output
+                producerTask: llm-candidate-generator
+        taskInfo:
+          name: db-worker
+      llm-candidate-generator:
+        cachingOptions: {}
+        componentRef:
+          name: comp-llm-candidate-generator
+        dependentTasks:
+        - llm-seed-data
+        inputs:
+          parameters:
+            seed_data:
+              taskOutputParameter:
+                outputParameterKey: Output
+                producerTask: llm-seed-data
+        taskInfo:
+          name: llm-candidate-generator
+      llm-md:
+        cachingOptions: {}
+        componentRef:
+          name: comp-llm-md
+        inputs:
+          parameters:
+            path:
+              componentInputParameter: path
+        taskInfo:
+          name: llm-md
+      llm-seed-data:
+        cachingOptions: {}
+        componentRef:
+          name: comp-llm-seed-data
+        dependentTasks:
+        - llm-md
+        inputs:
+          parameters:
+            md_file:
+              taskOutputParameter:
+                outputParameterKey: Output
+                producerTask: llm-md
+        taskInfo:
+          name: llm-seed-data
+  inputDefinitions:
+    parameters:
+      path:
+        parameterType: STRING
+schemaVersion: 2.1.0
+sdkVersion: kfp-2.16.0
