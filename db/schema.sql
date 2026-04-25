@@ -1,6 +1,7 @@
-CREATE TABLE IF NOT EXISTS storage(
+CREATE TABLE IF NOT EXISTS storage2(
     idx SERIAL PRIMARY KEY,
+    stage TEXT NOT NULL,
     question TEXT NOT NULL,
-    original_answer TEXT NOT NULL,
-    candidate_answers JSONB
+    original_answer TEXT,
+    payload JSONB NOT NULL
 );

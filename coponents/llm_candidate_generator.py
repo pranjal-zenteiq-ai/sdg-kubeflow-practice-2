@@ -18,13 +18,13 @@ def llm_candidate_generator(seed_data:str)->str:
         temperature=0.3,
         max_completion_tokens=256,
     )
-    client_dean=ChatNVIDIA(
-        model=os.getenv("NVIDIA_MODEL2"),
-        api_key=os.getenv("NVIDIA_API_KEY2"),
-        top_p=1,
-        temperature=0.3,
-        max_completion_tokens=256,
-    )
+    # client_dean=ChatNVIDIA(
+    #     model=os.getenv("NVIDIA_MODEL2"),
+    #     api_key=os.getenv("NVIDIA_API_KEY2"),
+    #     top_p=1,
+    #     temperature=0.3,
+    #     max_completion_tokens=256,
+    # )
     def first_json(text):
         text=text.strip().replace("```json","").replace("```","").strip()
         start_candidates=[i for i in [text.find("["),text.find("{")] if i!=-1]
@@ -40,6 +40,7 @@ def llm_candidate_generator(seed_data:str)->str:
         x=[x]
     if not isinstance(x,list):
         raise ValueError("Invalid input format, list olyyyyy")
+    ans=[]
     dean_output=[]
     for i in x:
         c=i.get("question","")
@@ -69,46 +70,9 @@ def llm_candidate_generator(seed_data:str)->str:
         for j in candi_json:
             if isinstance(j,dict) and j.get("answer"):
                 candidate_answers.append(j["answer"].strip())
-        prompt_dean=f"""
-        You are an expert evaluator.
-        Question: {c}
-        Ground Truth Answer: {a}
-        Candidate Answers to Evaluate: {json.dumps(candidate_answers,ensure_ascii=False)}
-        Evaluation Rules:
-        1. Compare EACH candidate answer against the Ground Truth Answer.
-        2. ACCEPT a candidate if it correctly answers the question AND its core facts align with the Ground Truth. Synonyms and rephrasing are perfectly fine.
-        3. REJECT a candidate if it introduces new facts, industries, or concepts NOT found in the Ground Truth (e.g., hallucinating external knowledge).
-        4. REJECT a candidate if it contradicts the Ground Truth or misses the core point.
-        Output ONLY valid JSON without markdown code blocks (no ```json) in this exact format:
-        {{
-        "question": "{c}",
-        "original_ans": "{a}",
-        "candidate_answers": ["<only accepted answers>"]
-        }}
-        """
-        # try:
-        #     p=json.loads(client_dean.invoke(prompt_dean).content)
-        # except:
-        #     p={"question":c,"original_ans":i.get("answer"),"candidate_answers":[candi_ans.content]}
-        # try:
-        #     p=json.loads(client_dean.invoke(prompt_dean))
-        # except:
-        #     p={"question":c,"original_ans":i.get("answer"),"candidate_answers":[candi_ans.content]}
-        dean_raw=client_dean.invoke(prompt_dean).content
-        try:
-            p=first_json(dean_raw)
-        except:
-            p={"question":c,"original_ans":a,"candidate_answers":candidate_answers}
-
-        if not isinstance(p,dict):
-            p={"question":c,"original_ans":a,"candidate_answers":candidate_answers}
-
-        if "question" not in p:
-            p["question"]=c
-        if "original_ans" not in p:
-            p["original_ans"]=a
-        if "candidate_answers" not in p or not isinstance(p["candidate_answers"],list):
-            p["candidate_answers"]=candidate_answers
-
-        dean_output.append(p)  
-    return json.dumps(dean_output)
+        ans.append({
+            "question":c,
+            "original_ans":a,
+            "candidate_answers":candidate_answers
+        })
+    return json.dumps(ans,ensure_ascii=False)

@@ -4,11 +4,35 @@
 # Inputs:
 #    path: str
 components:
+  comp-chunking:
+    executorLabel: exec-chunking
+    inputDefinitions:
+      parameters:
+        md:
+          parameterType: STRING
+    outputDefinitions:
+      parameters:
+        Output:
+          parameterType: STRING
   comp-db-worker:
     executorLabel: exec-db-worker
     inputDefinitions:
       parameters:
         data:
+          parameterType: STRING
+        stage:
+          parameterType: STRING
+    outputDefinitions:
+      parameters:
+        Output:
+          parameterType: STRING
+  comp-db-worker-2:
+    executorLabel: exec-db-worker-2
+    inputDefinitions:
+      parameters:
+        data:
+          parameterType: STRING
+        stage:
           parameterType: STRING
     outputDefinitions:
       parameters:
@@ -19,6 +43,26 @@ components:
     inputDefinitions:
       parameters:
         seed_data:
+          parameterType: STRING
+    outputDefinitions:
+      parameters:
+        Output:
+          parameterType: STRING
+  comp-llm-dean:
+    executorLabel: exec-llm-dean
+    inputDefinitions:
+      parameters:
+        ans:
+          parameterType: STRING
+    outputDefinitions:
+      parameters:
+        Output:
+          parameterType: STRING
+  comp-llm-eval:
+    executorLabel: exec-llm-eval
+    inputDefinitions:
+      parameters:
+        data:
           parameterType: STRING
     outputDefinitions:
       parameters:
@@ -46,6 +90,71 @@ components:
           parameterType: STRING
 deploymentSpec:
   executors:
+    exec-chunking:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - chunking
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'sentence-transformers>=5.4.1'\
+          \ 'pymilvus>=2.6.12' 'python-dotenv>=1.2.2'  &&  python3 -m pip install\
+          \ --quiet --no-warn-script-location 'kfp==2.16.0' '--no-deps' 'typing-extensions>=3.7.4,<5;\
+          \ python_version<\"3.9\"' && \"$0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef chunking(md:str)->str:\n    import os\n    import json \n   \
+          \ import uuid\n    import dotenv\n    from pymilvus import MilvusClient,DataType\n\
+          \    from sentence_transformers import SentenceTransformer\n    dotenv.load_dotenv()\n\
+          \    client_milvus = MilvusClient(\n        uri=os.getenv(\"MILVUS_URI\"\
+          ),\n        token=os.getenv(\"MILVUS_TOKEN\")\n    )\n    collection_name=os.getenv(\"\
+          MILVUS_COLLECTION_NAME\")\n    embedding_model=os.getenv(\"EMBEDDING_MODEL\"\
+          )\n    embedd=SentenceTransformer(embedding_model)\n    dim=embedd.get_embedding_dimension()\n\
+          \    if not client_milvus.has_collection(collection_name):\n        schema=client_milvus.create_schema(auto_id=False)\n\
+          \        schema.add_field(field_name=\"chunk_id\",datatype=DataType.VARCHAR,is_primary=True,max_length=100)\n\
+          \        schema.add_field(field_name=\"text\",datatype=DataType.VARCHAR,max_length=2000)\n\
+          \        schema.add_field(field_name=\"embedding\",datatype=DataType.FLOAT_VECTOR,dim=dim)\n\
+          \        index_params=client_milvus.prepare_index_params()\n        index_params.add_index(\n\
+          \            field_name=\"embedding\",\n            index_type=\"AUTOINDEX\"\
+          ,\n            metric_type=\"COSINE\"\n        )\n        client_milvus.create_collection(\n\
+          \            collection_name=collection_name,\n            schema=schema,\n\
+          \            index_params=index_params\n        )\n        client_milvus.load_collection(collection_name)\n\
+          \    text=md.replace(\"\\r\\n\",\"\\n\").strip()\n    paras=[p.strip() for\
+          \ p in text.split(\"\\n\\n\") if p.strip()]\n    chunks=[]\n    current=\"\
+          \"\n    maxi_chars=1000\n    for i in paras:\n        if current==\"\":\n\
+          \            current=i\n        elif len(current)+len(i)<=maxi_chars:\n\
+          \            current+=\" \"+i\n        else:\n            chunks.append(current)\n\
+          \            current=i\n    if current:\n        chunks.append(current)\n\
+          \n    # if current!=\"\":\n    #     chunks.append(current)\n    vectors=embedd.encode(chunks,normalize_embeddings=True,show_progress_bar=True).tolist()\n\
+          \    ans=[]\n    for i,j in zip(chunks,vectors):\n        ans.append({\n\
+          \            \"chunk_id\":str(uuid.uuid4()),\n            \"text\":i,\n\
+          \            \"embedding\":j\n        })\n    client_milvus.insert(collection_name=collection_name,data=ans)\n\
+          \    client_milvus.flush(collection_name=collection_name)\n    client_milvus.load_collection(collection_name)\n\
+          \    return json.dumps(ans,ensure_ascii=False)\n\n"
+        env:
+        - name: MILVUS_URI
+          value: http://host.minikube.internal:19532
+        - name: MILVUS_TOKEN
+          value: root:MILVUS
+        - name: MILVUS_COLLECTION_NAME
+          value: markdown_chunks
+        - name: EMBEDDING_MODEL
+          value: sentence-transformers/all-MiniLM-L6-v2
+        image: python:3.12
     exec-db-worker:
       container:
         args:
@@ -73,17 +182,69 @@ deploymentSpec:
 
           '
         - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
-          \ *\n\ndef db_worker(data:str)->str:\n    import os\n    from psycopg2 import\
-          \ connect\n    import dotenv\n    import json\n    dotenv.load_dotenv()\n\
-          \    data=json.loads(data)\n    for d in data:\n        i=d[\"question\"\
-          ]\n        j=d[\"original_ans\"]\n        k=d[\"candidate_answers\"]\n \
-          \       conn=connect(\n            host=os.getenv(\"DB_HOST\"),\n      \
-          \      user=os.getenv(\"DB_USER\"),\n            password=os.getenv(\"DB_PASSWORD\"\
-          ),\n            dbname=os.getenv(\"DB_NAME\"),\n        )\n        cur=conn.cursor()\n\
-          \        cur.execute(\"INSERT INTO storage (question,original_answer,candidate_answers)\
-          \ VALUES (%s,%s,%s)\",(i,j,json.dumps(k)))\n        conn.commit()\n    \
-          \    cur.close()\n    conn.close()\n    return \"Data inserted successfully\"\
-          \n\n"
+          \ *\n\ndef db_worker(data:str,stage:str)->str:\n    import os\n    from\
+          \ psycopg2 import connect\n    import dotenv\n    import json\n    dotenv.load_dotenv()\n\
+          \    data=json.loads(data)\n    if isinstance(data,dict):\n        data=[data]\n\
+          \    for d in data:\n        # i=d[\"question\"]\n        # j=d[\"original_ans\"\
+          ]\n        # k=d[\"candidate_answers\"]\n        i=d.get(\"question\",\"\
+          \")\n        j=d.get(\"original_ans\",\"\")\n        # k=d.get(\"candidate_answers\"\
+          ,[])\n        conn=connect(\n            host=os.getenv(\"DB_HOST\"),\n\
+          \            user=os.getenv(\"DB_USER\"),\n            password=os.getenv(\"\
+          DB_PASSWORD\"),\n            dbname=os.getenv(\"DB_NAME\"),\n        )\n\
+          \        cur=conn.cursor()\n        cur.execute(\"INSERT INTO storage2 (stage,question,original_answer,payload)\
+          \ VALUES (%s,%s,%s,%s)\",(stage,i,j,json.dumps(d,ensure_ascii=False)))\n\
+          \        conn.commit()\n        cur.close()\n    conn.close()\n    return\
+          \ \"Data inserted successfully\"\n\n"
+        env:
+        - name: DB_HOST
+          value: host.minikube.internal
+        - name: DB_USER
+          value: postgres
+        - name: DB_PASSWORD
+          value: password
+        - name: DB_NAME
+          value: postgres
+        image: python:3.12
+    exec-db-worker-2:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - db_worker
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'sqlalchemy>=2.0.25'\
+          \ 'psycopg2-binary>=2.9.12' 'python-dotenv>=1.2.2'  &&  python3 -m pip install\
+          \ --quiet --no-warn-script-location 'kfp==2.16.0' '--no-deps' 'typing-extensions>=3.7.4,<5;\
+          \ python_version<\"3.9\"' && \"$0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef db_worker(data:str,stage:str)->str:\n    import os\n    from\
+          \ psycopg2 import connect\n    import dotenv\n    import json\n    dotenv.load_dotenv()\n\
+          \    data=json.loads(data)\n    if isinstance(data,dict):\n        data=[data]\n\
+          \    for d in data:\n        # i=d[\"question\"]\n        # j=d[\"original_ans\"\
+          ]\n        # k=d[\"candidate_answers\"]\n        i=d.get(\"question\",\"\
+          \")\n        j=d.get(\"original_ans\",\"\")\n        # k=d.get(\"candidate_answers\"\
+          ,[])\n        conn=connect(\n            host=os.getenv(\"DB_HOST\"),\n\
+          \            user=os.getenv(\"DB_USER\"),\n            password=os.getenv(\"\
+          DB_PASSWORD\"),\n            dbname=os.getenv(\"DB_NAME\"),\n        )\n\
+          \        cur=conn.cursor()\n        cur.execute(\"INSERT INTO storage2 (stage,question,original_answer,payload)\
+          \ VALUES (%s,%s,%s,%s)\",(stage,i,j,json.dumps(d,ensure_ascii=False)))\n\
+          \        conn.commit()\n        cur.close()\n    conn.close()\n    return\
+          \ \"Data inserted successfully\"\n\n"
         env:
         - name: DB_HOST
           value: host.minikube.internal
@@ -127,35 +288,101 @@ deploymentSpec:
           \    client_candidate_generator=ChatNVIDIA(\n        model=os.getenv(\"\
           NVIDIA_MODEL2\"),\n        api_key=os.getenv(\"NVIDIA_API_KEY2\"),\n   \
           \     top_p=1,\n        temperature=0.3,\n        max_completion_tokens=256,\n\
-          \    )\n    client_dean=ChatNVIDIA(\n        model=os.getenv(\"NVIDIA_MODEL2\"\
-          ),\n        api_key=os.getenv(\"NVIDIA_API_KEY2\"),\n        top_p=1,\n\
-          \        temperature=0.3,\n        max_completion_tokens=256,\n    )\n \
-          \   def first_json(text):\n        text=text.strip().replace(\"```json\"\
+          \    )\n    # client_dean=ChatNVIDIA(\n    #     model=os.getenv(\"NVIDIA_MODEL2\"\
+          ),\n    #     api_key=os.getenv(\"NVIDIA_API_KEY2\"),\n    #     top_p=1,\n\
+          \    #     temperature=0.3,\n    #     max_completion_tokens=256,\n    #\
+          \ )\n    def first_json(text):\n        text=text.strip().replace(\"```json\"\
           ,\"\").replace(\"```\",\"\").strip()\n        start_candidates=[i for i\
           \ in [text.find(\"[\"),text.find(\"{\")] if i!=-1]\n        if not start_candidates:\n\
           \            raise ValueError(\"No JSON found\")\n        start=min(start_candidates)\n\
           \        obj,_=json.JSONDecoder().raw_decode(text[start:])\n        return\
           \ obj\n    x=json.loads(seed_data)\n    if isinstance(x,str):\n        x=json.loads(x)\n\
           \    if isinstance(x,dict):\n        x=[x]\n    if not isinstance(x,list):\n\
-          \        raise ValueError(\"Invalid input format, list olyyyyy\")\n    dean_output=[]\n\
-          \    for i in x:\n        c=i.get(\"question\",\"\")\n        a=i.get(\"\
-          answer\",\"\")\n        prompt=f\"\"\"\n        You are an expert AI data\
-          \ generator. I will give you a Question. \n        Your task is to generate\
-          \ 3 distinct, accurate, and meaningful answers to this question.\n     \
-          \   Question: {c}\n        Rules:\n        1. The 3 answers must be factually\
-          \ correct and directly answer the question.\n        2. Vary the length\
-          \ and sentence structure.\n        3. Output ONLY valid JSON in this exact\
-          \ format, with no markdown code blocks (no ```json):\n        [\n      \
-          \  {{\"answer\": \"...\"}},\n        {{\"answer\": \"...\"}},\n        {{\"\
-          answer\": \"...\"}}\n        ]\n        \"\"\"\n        candi_raw=client_candidate_generator.invoke(prompt).content\n\
-          \        try:\n            candi_json=first_json(candi_raw)\n        except:\n\
+          \        raise ValueError(\"Invalid input format, list olyyyyy\")\n    ans=[]\n\
+          \    dean_output=[]\n    for i in x:\n        c=i.get(\"question\",\"\"\
+          )\n        a=i.get(\"answer\",\"\")\n        prompt=f\"\"\"\n        You\
+          \ are an expert AI data generator. I will give you a Question. \n      \
+          \  Your task is to generate 3 distinct, accurate, and meaningful answers\
+          \ to this question.\n        Question: {c}\n        Rules:\n        1. The\
+          \ 3 answers must be factually correct and directly answer the question.\n\
+          \        2. Vary the length and sentence structure.\n        3. Output ONLY\
+          \ valid JSON in this exact format, with no markdown code blocks (no ```json):\n\
+          \        [\n        {{\"answer\": \"...\"}},\n        {{\"answer\": \"...\"\
+          }},\n        {{\"answer\": \"...\"}}\n        ]\n        \"\"\"\n      \
+          \  candi_raw=client_candidate_generator.invoke(prompt).content\n       \
+          \ try:\n            candi_json=first_json(candi_raw)\n        except:\n\
           \            candi_json=[{\"answer\":a}]\n        if isinstance(candi_json,dict):\n\
           \            candi_json=[candi_json]\n        candidate_answers=[]\n   \
           \     for j in candi_json:\n            if isinstance(j,dict) and j.get(\"\
           answer\"):\n                candidate_answers.append(j[\"answer\"].strip())\n\
-          \        prompt_dean=f\"\"\"\n        You are an expert evaluator.\n   \
-          \     Question: {c}\n        Ground Truth Answer: {a}\n        Candidate\
-          \ Answers to Evaluate: {json.dumps(candidate_answers,ensure_ascii=False)}\n\
+          \        ans.append({\n            \"question\":c,\n            \"original_ans\"\
+          :a,\n            \"candidate_answers\":candidate_answers\n        })\n \
+          \   return json.dumps(ans,ensure_ascii=False)\n\n"
+        env:
+        - name: NVIDIA_API_KEY2
+          value: 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
+        - name: NVIDIA_MODEL2
+          value: moonshotai/kimi-k2-instruct-0905
+        image: python:3.12
+    exec-llm-dean:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - llm_dean
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'langchain-nvidia-ai-endpoints>=1.2.1'\
+          \ 'python-dotenv>=1.2.2'  &&  python3 -m pip install --quiet --no-warn-script-location\
+          \ 'kfp==2.16.0' '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"\
+          3.9\"' && \"$0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef llm_dean(ans:str)->str:\n    import os\n    import dotenv\n \
+          \   from langchain_nvidia_ai_endpoints.chat_models import ChatNVIDIA\n \
+          \   import json\n    dotenv.load_dotenv()\n    client_dean=ChatNVIDIA(\n\
+          \        model=os.getenv(\"NVIDIA_MODEL2\"),\n        api_key=os.getenv(\"\
+          NVIDIA_API_KEY2\"),\n        top_p=1,\n        temperature=0.3,\n      \
+          \  max_completion_tokens=512,\n    )\n    def first_json(text):\n      \
+          \  text=text.strip().replace(\"```json\",\"\").replace(\"```\",\"\").strip()\n\
+          \        start_candidates=[i for i in [text.find(\"[\"),text.find(\"{\"\
+          )] if i!=-1]\n        if not start_candidates:\n            raise ValueError(\"\
+          No JSON found\")\n        start=min(start_candidates)\n        obj,_=json.JSONDecoder().raw_decode(text[start:])\n\
+          \        return obj\n    x=json.loads(ans)\n    if isinstance(x,str):\n\
+          \        x=json.loads(x)\n    if isinstance(x,dict):\n        x=[x]\n  \
+          \  if not isinstance(x,list):\n        raise ValueError(\"Format wrong mate\"\
+          )\n    dean_output=[]\n    for i in x:\n        c=i.get(\"question\",\"\"\
+          )\n        a=i.get(\"original_ans\",\"\")\n        candidate_answers=i.get(\"\
+          candidate_answers\",[])\n        # prompt_dean=f\"\"\"\n        # You are\
+          \ an expert evaluator.\n        # Question: {c}\n        # Ground Truth\
+          \ Answer: {a}\n        # Candidate Answers to Evaluate: {json.dumps(candidate_answers,ensure_ascii=False)}\n\
+          \        # Evaluation Rules:\n        # 1. Compare EACH candidate answer\
+          \ against the Ground Truth Answer.\n        # 2. ACCEPT a candidate if it\
+          \ correctly answers the question AND its core facts align with the Ground\
+          \ Truth. Synonyms and rephrasing are perfectly fine.\n        # 3. REJECT\
+          \ a candidate if it introduces new facts, industries, or concepts NOT found\
+          \ in the Ground Truth (e.g., hallucinating external knowledge).\n      \
+          \  # 4. REJECT a candidate if it contradicts the Ground Truth or misses\
+          \ the core point.\n        # Output ONLY valid JSON without markdown code\
+          \ blocks (no ```json) in this exact format:\n        # {{\n        # \"\
+          question\": \"{c}\",\n        # \"original_ans\": \"{a}\",\n        # \"\
+          candidate_answers\": [\"<only accepted answers>\"]\n        # }}\n     \
+          \   # \"\"\"\n        prompt_dean = f\"\"\"\n        You are an expert evaluator.\n\
+          \        Question: {c}\n        Ground Truth Answer: {a}\n        Candidate\
+          \ Answers to Evaluate: {json.dumps(candidate_answers, ensure_ascii=False)}\n\
           \        Evaluation Rules:\n        1. Compare EACH candidate answer against\
           \ the Ground Truth Answer.\n        2. ACCEPT a candidate if it correctly\
           \ answers the question AND its core facts align with the Ground Truth. Synonyms\
@@ -163,29 +390,189 @@ deploymentSpec:
           \ introduces new facts, industries, or concepts NOT found in the Ground\
           \ Truth (e.g., hallucinating external knowledge).\n        4. REJECT a candidate\
           \ if it contradicts the Ground Truth or misses the core point.\n       \
-          \ Output ONLY valid JSON without markdown code blocks (no ```json) in this\
-          \ exact format:\n        {{\n        \"question\": \"{c}\",\n        \"\
-          original_ans\": \"{a}\",\n        \"candidate_answers\": [\"<only accepted\
-          \ answers>\"]\n        }}\n        \"\"\"\n        # try:\n        #   \
-          \  p=json.loads(client_dean.invoke(prompt_dean).content)\n        # except:\n\
-          \        #     p={\"question\":c,\"original_ans\":i.get(\"answer\"),\"candidate_answers\"\
-          :[candi_ans.content]}\n        # try:\n        #     p=json.loads(client_dean.invoke(prompt_dean))\n\
+          \ 5. CRITICAL: You MUST include an evaluation object for EVERY single candidate\
+          \ answer provided in the input. Do NOT omit, skip, or filter out any candidate\
+          \ answer, regardless of whether it is accepted or rejected.\n        Output\
+          \ ONLY valid JSON without markdown code blocks (no ```json) in this exact\
+          \ format:\n        {{\n            \"question\": \"{c}\",\n            \"\
+          original_ans\": \"{a}\",\n            \"evaluations\": [\n             \
+          \   {{\n                    \"candidate_answer\": \"<insert candidate answer\
+          \ text here>\",\n                    \"status\": \"<accepted or rejected>\"\
+          \n                }}\n            ]\n        }}\n        \"\"\"\n      \
+          \  # try:\n        #     p=json.loads(client_dean.invoke(prompt_dean).content)\n\
           \        # except:\n        #     p={\"question\":c,\"original_ans\":i.get(\"\
-          answer\"),\"candidate_answers\":[candi_ans.content]}\n        dean_raw=client_dean.invoke(prompt_dean).content\n\
+          answer\"),\"candidate_answers\":[candi_ans.content]}\n        # try:\n \
+          \       #     p=json.loads(client_dean.invoke(prompt_dean))\n        # except:\n\
+          \        #     p={\"question\":c,\"original_ans\":i.get(\"answer\"),\"candidate_answers\"\
+          :[candi_ans.content]}\n        # dean_raw=client_dean.invoke(prompt_dean).content\n\
+          \        # try:\n        #     p=first_json(dean_raw)\n        # except:\n\
+          \        #     p={\"question\":c,\"original_ans\":a,\"candidate_answers\"\
+          :candidate_answers}\n\n        # if not isinstance(p,dict):\n        # \
+          \    p={\"question\":c,\"original_ans\":a,\"candidate_answers\":candidate_answers}\n\
+          \n        # if \"question\" not in p:\n        #     p[\"question\"]=c\n\
+          \        # if \"original_ans\" not in p:\n        #     p[\"original_ans\"\
+          ]=a\n        # if \"candidate_answers\" not in p or not isinstance(p[\"\
+          candidate_answers\"],list):\n        #     p[\"candidate_answers\"]=candidate_answers\n\
+          \n        # dean_output.append(p)\n        dean_raw=client_dean.invoke(prompt_dean).content\n\
           \        try:\n            p=first_json(dean_raw)\n        except:\n   \
-          \         p={\"question\":c,\"original_ans\":a,\"candidate_answers\":candidate_answers}\n\
-          \n        if not isinstance(p,dict):\n            p={\"question\":c,\"original_ans\"\
-          :a,\"candidate_answers\":candidate_answers}\n\n        if \"question\" not\
-          \ in p:\n            p[\"question\"]=c\n        if \"original_ans\" not\
-          \ in p:\n            p[\"original_ans\"]=a\n        if \"candidate_answers\"\
-          \ not in p or not isinstance(p[\"candidate_answers\"],list):\n         \
-          \   p[\"candidate_answers\"]=candidate_answers\n\n        dean_output.append(p)\
-          \  \n    return json.dumps(dean_output)\n\n"
+          \         p={\n                \"question\":c,\n                \"original_ans\"\
+          :a,\n                \"evaluations\":[\n                    {\"candidate_answer\"\
+          :x,\"status\":\"rejected\"}\n                    for x in candidate_answers\n\
+          \                ]\n            }\n        if not isinstance(p,dict):\n\
+          \            p={\n                \"question\":c,\n                \"original_ans\"\
+          :a,\n                \"evaluations\":[\n                    {\"candidate_answer\"\
+          :x,\"status\":\"rejected\"}\n                    for x in candidate_answers\n\
+          \                ]\n            }\n        if \"question\" not in p:\n \
+          \           p[\"question\"]=c\n        if \"original_ans\" not in p:\n \
+          \           p[\"original_ans\"]=a\n\n        if \"evaluations\" not in p\
+          \ or not isinstance(p[\"evaluations\"],list):\n            p[\"evaluations\"\
+          ]=[\n                {\"candidate_answer\":x,\"status\":\"rejected\"}\n\
+          \                for x in candidate_answers\n            ]\n        clean_evals=[]\n\
+          \        seen=set()\n        for j in p[\"evaluations\"]:\n            if\
+          \ isinstance(j,dict):\n                cand=j.get(\"candidate_answer\",\"\
+          \").strip()\n                status=j.get(\"status\",\"rejected\").strip().lower()\n\
+          \                if cand:\n                    clean_evals.append({\n  \
+          \                      \"candidate_answer\":cand,\n                    \
+          \    \"status\":\"accepted\" if status==\"accepted\" else \"rejected\"\n\
+          \                    })\n                    seen.add(cand)\n        for\
+          \ x in candidate_answers:\n            if x not in seen:\n             \
+          \   clean_evals.append({\n                    \"candidate_answer\":x,\n\
+          \                    \"status\":\"rejected\"\n                })\n     \
+          \   p[\"evaluations\"]=clean_evals\n        dean_output.append(p)\n    return\
+          \ json.dumps(dean_output)\n\n"
         env:
         - name: NVIDIA_API_KEY2
           value: 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
         - name: NVIDIA_MODEL2
           value: moonshotai/kimi-k2-instruct-0905
+        image: python:3.12
+    exec-llm-eval:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - llm_eval
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'langchain-nvidia-ai-endpoints>=1.2.1'\
+          \ 'python-dotenv>=1.2.2' 'pymilvus>=2.5.0' 'sentence-transformers>=2.2.0'\
+          \  &&  python3 -m pip install --quiet --no-warn-script-location 'kfp==2.16.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
+          $0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef llm_eval(data:str)->str:\n    import json\n    import os\n  \
+          \  import dotenv\n    dotenv.load_dotenv()\n    from langchain_nvidia_ai_endpoints\
+          \ import ChatNVIDIA\n    client_eval=ChatNVIDIA(\n        model=os.getenv(\"\
+          NVIDIA_MODEL2\"),\n        api_key=os.getenv(\"NVIDIA_API_KEY2\"),\n   \
+          \     top_p=1,\n        temperature=0.3,\n        max_completion_tokens=512,\n\
+          \    )\n    def semantic_search(questoin:str,topK:int=2)->str:\n       \
+          \ import os\n        import json\n        import dotenv\n        dotenv.load_dotenv()\n\
+          \        from pymilvus import MilvusClient,DataType\n        from sentence_transformers\
+          \ import SentenceTransformer\n        client_milvus=MilvusClient(\n    \
+          \        uri=os.getenv(\"MILVUS_URI\"),\n            token=os.getenv(\"\
+          MILVUS_TOKEN\")\n        )\n        collection_name=os.getenv(\"MILVUS_COLLECTION_NAME\"\
+          )\n        embedding_model=os.getenv(\"EMBEDDING_MODEL\")\n        embedd=SentenceTransformer(embedding_model)\n\
+          \        client_milvus.load_collection(collection_name)\n        qv=embedd.encode([questoin],normalize_embeddings=True).tolist()[0]\n\
+          \        ans=client_milvus.search(\n            collection_name=collection_name,\n\
+          \            data=[qv],\n            limit=topK,\n            output_fields=[\"\
+          chunk_id\",\"text\"],\n            search_params={\"metric_type\":\"COSINE\"\
+          }\n        )\n        return json.dumps(ans,ensure_ascii=False)\n    def\
+          \ first_json(text):\n        text=text.strip().replace(\"```json\",\"\"\
+          ).replace(\"```\",\"\").strip()\n        start_candidates=[i for i in [text.find(\"\
+          [\"),text.find(\"{\")] if i!=-1]\n        if not start_candidates:\n   \
+          \         raise ValueError(\"No JSON found\")\n        start=min(start_candidates)\n\
+          \        obj,_=json.JSONDecoder().raw_decode(text[start:])\n        return\
+          \ obj\n    x=json.loads(data)\n    if isinstance(x,str):\n        x=json.loads(x)\n\
+          \    if isinstance(x,dict):\n        x=[x]\n    if not isinstance(x,list):\n\
+          \        raise ValueError(\"Format wrong guyssss\")\n    ans2=[]\n    for\
+          \ i in x:\n        c=i.get(\"question\",\"\")\n        candi=i.get(\"candidate_answers\"\
+          ,[])\n        chunks=semantic_search(c,2)\n        if isinstance(chunks,str):\n\
+          \            chunks=json.loads(chunks)\n\n        # prompt=f\"\"\"\n   \
+          \     # You are an expert evaluater. \n        # You have:\n        # 1.\
+          \ Question: {c}\n        # 2. Candidate answers: {candi}\n        # 3. Relevant\
+          \ chunks: {chunks}\n        # YOUR JOB IS TO UNDERSTAND THE QUESTION AND\
+          \ THE RELEVANT CHUNKS YOU HAVE. \n        # FROM THAT YOU HAVE TO EVALUATE\
+          \ EACH CANDIDATE ANSWER. \n        # 2. ACCEPT a candidate if it correctly\
+          \ answers the question AND its core facts align with the Ground Truth. Synonyms\
+          \ and rephrasing are perfectly fine.\n        # 3. REJECT a candidate if\
+          \ it introduces new facts, industries, or concepts NOT found in the Ground\
+          \ Truth (e.g., hallucinating external knowledge).\n        # 4. REJECT a\
+          \ candidate if it contradicts the Ground Truth or misses the core point.\n\
+          \        # 5. CRITICAL: You MUST include an evaluation object for EVERY\
+          \ single candidate answer provided in the input. Do NOT omit, skip, or filter\
+          \ out any candidate answer, regardless of whether it is accepted or rejected.\n\
+          \        # Output ONLY valid JSON without markdown code blocks (no ```json)\
+          \ in this exact format:\n        # {{\n        #     \"question\": \"{c}\"\
+          ,\n        #     \"candidate_answers\": [\n        #         {{\n      \
+          \  #             \"candidate_answer\": \"<insert candidate answer text here>\"\
+          ,\n        #             \"status\": \"<accepted or rejected>\"\n      \
+          \  #         }}\n        #     ]\n        # }}\n        # \"\"\"\n     \
+          \   prompt=f\"\"\"\n        You are an expert evaluator.\n\n        You\
+          \ have:\n        1. Question: {c}\n        2. Candidate answers: {json.dumps(candi,ensure_ascii=False)}\n\
+          \        3. Relevant chunks: {json.dumps(chunks,ensure_ascii=False)}\n\n\
+          \        Your job is to understand the question and the relevant chunks.\n\
+          \        From that, evaluate each candidate answer.\n\n        1. ACCEPT\
+          \ a candidate if it correctly answers the question and its core facts align\
+          \ with the retrieved chunks.\n        2. REJECT a candidate if it adds unsupported\
+          \ facts or goes beyond the retrieved chunks.\n        3. REJECT a candidate\
+          \ if it contradicts the retrieved chunks or misses the core point.\n   \
+          \     4. You must include an evaluation object for every candidate answer.\n\
+          \n        Output ONLY valid JSON in this exact format:\n        {{\n   \
+          \         \"question\": \"{c}\",\n            \"evaluations\": [\n     \
+          \           {{\n                    \"candidate_answer\": \"<insert candidate\
+          \ answer text here>\",\n                    \"status\": \"<accepted or rejected>\"\
+          \n                }}\n            ]\n        }}\n        \"\"\"\n      \
+          \  eval_raw=client_eval.invoke(prompt).content\n        try:\n         \
+          \   p=first_json(eval_raw)\n        except:\n            p={\n         \
+          \       \"question\":c,\n                \"evaluations\":[\n           \
+          \         {\"candidate_answer\":x,\"status\":\"rejected\"}\n           \
+          \         for x in candi\n                ]\n            }\n        if not\
+          \ isinstance(p,dict):\n            p={\n                \"question\":c,\n\
+          \                \"evaluations\":[\n                    {\"candidate_answer\"\
+          :x,\"status\":\"rejected\"}\n                    for x in candi\n      \
+          \          ]\n            }\n\n        if \"question\" not in p:\n     \
+          \       p[\"question\"]=c\n\n        if \"evaluations\" not in p or not\
+          \ isinstance(p[\"evaluations\"],list):\n            p[\"evaluations\"]=[\n\
+          \                {\"candidate_answer\":x,\"status\":\"rejected\"}\n    \
+          \            for x in candi\n            ]\n        ans=[]\n        sett=set()\n\
+          \        for j in p[\"evaluations\"]:\n            if isinstance(j,dict):\n\
+          \                cand=j.get(\"candidate_answer\",\"\").strip()\n       \
+          \         status=j.get(\"status\",\"rejected\").strip().lower()\n      \
+          \          if cand:\n                    ans.append({\n                \
+          \        \"candidate_answer\":cand,\n                        \"status\"\
+          :\"accepted\" if status==\"accepted\" else \"rejected\"\n              \
+          \      })\n                    sett.add(cand)\n\n        for x in candi:\n\
+          \            if x not in sett:\n                ans.append({\n         \
+          \           \"candidate_answer\":x,\n                    \"status\":\"rejected\"\
+          \n                })\n        p[\"evaluations\"]=ans\n        ans2.append(p)\n\
+          \    return json.dumps(ans2,ensure_ascii=False)\n\n"
+        env:
+        - name: NVIDIA_API_KEY2
+          value: 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
+        - name: NVIDIA_MODEL2
+          value: moonshotai/kimi-k2-instruct-0905
+        - name: MILVUS_URI
+          value: http://host.minikube.internal:19532
+        - name: MILVUS_TOKEN
+          value: root:MILVUS
+        - name: MILVUS_COLLECTION_NAME
+          value: markdown_chunks
+        - name: EMBEDDING_MODEL
+          value: sentence-transformers/all-MiniLM-L6-v2
         image: python:3.12
     exec-llm-md:
       container:
@@ -305,20 +692,54 @@ pipelineInfo:
 root:
   dag:
     tasks:
+      chunking:
+        cachingOptions: {}
+        componentRef:
+          name: comp-chunking
+        dependentTasks:
+        - llm-md
+        inputs:
+          parameters:
+            md:
+              taskOutputParameter:
+                outputParameterKey: Output
+                producerTask: llm-md
+        taskInfo:
+          name: chunking
       db-worker:
         cachingOptions: {}
         componentRef:
           name: comp-db-worker
         dependentTasks:
-        - llm-candidate-generator
+        - llm-dean
         inputs:
           parameters:
             data:
               taskOutputParameter:
                 outputParameterKey: Output
-                producerTask: llm-candidate-generator
+                producerTask: llm-dean
+            stage:
+              runtimeValue:
+                constant: dean
         taskInfo:
           name: db-worker
+      db-worker-2:
+        cachingOptions: {}
+        componentRef:
+          name: comp-db-worker-2
+        dependentTasks:
+        - llm-eval
+        inputs:
+          parameters:
+            data:
+              taskOutputParameter:
+                outputParameterKey: Output
+                producerTask: llm-eval
+            stage:
+              runtimeValue:
+                constant: eval
+        taskInfo:
+          name: db-worker-2
       llm-candidate-generator:
         cachingOptions: {}
         componentRef:
@@ -333,6 +754,35 @@ root:
                 producerTask: llm-seed-data
         taskInfo:
           name: llm-candidate-generator
+      llm-dean:
+        cachingOptions: {}
+        componentRef:
+          name: comp-llm-dean
+        dependentTasks:
+        - llm-candidate-generator
+        inputs:
+          parameters:
+            ans:
+              taskOutputParameter:
+                outputParameterKey: Output
+                producerTask: llm-candidate-generator
+        taskInfo:
+          name: llm-dean
+      llm-eval:
+        cachingOptions: {}
+        componentRef:
+          name: comp-llm-eval
+        dependentTasks:
+        - chunking
+        - llm-candidate-generator
+        inputs:
+          parameters:
+            data:
+              taskOutputParameter:
+                outputParameterKey: Output
+                producerTask: llm-candidate-generator
+        taskInfo:
+          name: llm-eval
       llm-md:
         cachingOptions: {}
         componentRef:
